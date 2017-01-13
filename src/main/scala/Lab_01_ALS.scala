@@ -1,29 +1,34 @@
+import org.apache.spark.ml.evaluation.RegressionEvaluator
 import org.apache.spark.ml.recommendation.ALS
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import readers.MovieLensLoader
 
+
+/**
+  * Trying to get to the bottom of the NaN in predictions.
+  */
 object Lab_01_ALS {
+
+  private val movieLensLoader = MovieLensLoader()
 
   def main(args: Array[String]): Unit = {
 
-    val spark = SparkSession
+    implicit val spark = SparkSession
       .builder()
-      .master("local[4]")
+      .master("local")
       .appName("Lab_01_ALS")
       .getOrCreate()
 
-    case class Rating(userId: Int, movieId: Int, rating: Float, timestamp: Long)
+    import spark.implicits._
 
-    val ratings: DataFrame = spark
-      .read
-      .format("csv")
-      .option("header", true)
-      .option("inferSchema", true)
-
-      .csv("src/main/resources/ml-latest-small/ratings.csv")
+    val ratings: DataFrame = movieLensLoader.load()
+    // userId
+    // movieId
+    // rating
+    // timestamp
 
     val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2))
 
-    ratings.columns.foreach(println)
 
     // Build the recommendation model using ALS on the training data
     val als = new ALS()
@@ -35,62 +40,58 @@ object Lab_01_ALS {
       .setRatingCol("rating")
 
     val model = als.fit(training)
+    // userId
+    // movieId
+    // rating
+    // timestamp
+    // prediction
 
     // Evaluate the model by computing the RMSE on the test data
     val predictions = model.transform(test)
 
-    predictions.columns.foreach(println)
-    //    userId
-    //    movieId
-    //    rating
-    //    timestamp
-    //    prediction
 
-    import spark.implicits._
+    val (userIds, movieIds) = test.map {
+      case Row(userId: Int, movieId: Int, _, _) => {
+        (userId, movieId)
+      }
+    }.collect().unzip
 
-    predictions.foreach {
-      row =>
-        for(i <- 0 until row.size) {
-          if (row.get(i) == null) {
-            println(s"row($row) has a null value! index($i) ${row.get(i)}")
+    val distinctUserIds = userIds.distinct
+    val distinctMovieIds = movieIds.distinct
+
+    val predictionAndErrors = predictions.map {
+      case Row(userId: Int, movieId: Int, rating: Double, _, prediction: Float) => {
+        val error = math.pow(rating - prediction, 2)
+        (userId, movieId, rating, prediction, error)
+      }
+    }.collect()
+
+    val numberOfNan = predictionAndErrors.count {
+      case (userId, movieId, rating, prediction, error) => {
+        val result = prediction.isNaN
+
+        if (result) {
+          if (!distinctMovieIds.contains(movieId) || !distinctUserIds.contains(userId)) {
+            println(s"userId $userId or movieId $movieId NOT CONTAINED in training $prediction")
+          } else {
+            println(s"userId $userId and movieId $movieId contained in training $prediction")
           }
         }
+
+        result
+      }
     }
 
+    println(s"${predictionAndErrors.size} Predictions and $numberOfNan NaN(s)")
 
-    val MSE_10 = predictions.take(10).map {
-      case row => {
-        val rating = row.getAs[Double]("rating")
-        val prediction = row.getAs[Float]("prediction")
-        val bla = math.pow(rating - prediction, 2)
+    val evaluator = new RegressionEvaluator()
+      .setMetricName("rmse")
+      .setLabelCol("rating")
+      .setPredictionCol("prediction")
 
-        println(s"bla: $bla")
+    val rmse = evaluator.evaluate(predictions.filter(row => !row.getAs[Float]("prediction").isNaN))
 
-        bla
-      }
-    }.reduce(_ + _) / 10
-
-    val MSE = predictions.map {
-      case row => {
-        val rating = row.getAs[Double]("rating")
-        val prediction = row.getAs[Float]("prediction")
-        math.pow(rating - prediction, 2)
-      }
-    }.reduce(_ + _) / predictions.count()
-
-    val RMSE = math.sqrt(MSE)
-
-    println(s"MSE_10($MSE_10) MSE($MSE) and RMSE($RMSE)")
-
-    //    val evaluator = new RegressionEvaluator()
-    //      .setMetricName("rmse")
-    //      .setLabelCol("rating")
-    //      .setPredictionCol("prediction")
-
-
-    //    val rmse = evaluator.evaluate(spark.createDataset(predictions.take(10)))
-
-    //    println(s"Root-mean-square error = $rmse")
+    println(s"Root-mean-square error = $rmse")
 
   }
 
